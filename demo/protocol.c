@@ -329,11 +329,11 @@ SR_PRIV void demo_generate_analog_pattern(struct dev_context *devc)
 
 
 	/* PATTERN_ANALOG_RANDOM — load from test_packets_v1.bin */
-	sr_err("Loading random pattern from test_packets_v1.bin.");
+	sr_err("Loading random pattern from test_packets_v2.bin.");
 
-	FILE *input_file = fopen("test_packets_v1.bin", "rb");
+	FILE *input_file = fopen("test_packets_v2.bin", "rb");
 	if (!input_file) {
-		sr_err("Failed to open test_packets_v1.bin.");
+		sr_err("Failed to open test_packets_v2.bin.");
 		devc->analog_patterns[PATTERN_ANALOG_RANDOM] = NULL;
 		return;
 	}
@@ -651,73 +651,6 @@ if (!devc) {
 	else
 		ag->packet.meaning->unit = SR_UNIT_UNITLESS;
 
-	//sr_err("send_analog_packet(): sdi=%p, devc=%p, ag=%p", (void *)sdi, (void *)sdi->priv, (void *)ag);
-
-
-	// if (!devc->avg) {
-	// 	ag_pattern_pos = analog_pos % pattern->num_samples;
-	// 	sending_now = MIN(analog_todo, pattern->num_samples - ag_pattern_pos);
-	// 	if (ag->amplitude != DEFAULT_ANALOG_AMPLITUDE ||
-	// 		ag->offset != DEFAULT_ANALOG_OFFSET ||
-	// 		ag->pattern == PATTERN_ANALOG_RANDOM) {
-	// 		/*
-	// 		 * Amplitude or offset changed (or we are generating
-	// 		 * random data), modify each sample.
-	// 		 */
-	// 		if (ag->pattern == PATTERN_ANALOG_RANDOM) {
-	// 			amplitude = ag->amplitude / 500.0;
-	// 			offset = ag->offset - DEFAULT_ANALOG_OFFSET - ag->amplitude;
-	// 		} else {
-	// 			amplitude = ag->amplitude / DEFAULT_ANALOG_AMPLITUDE;
-	// 			offset = ag->offset - DEFAULT_ANALOG_OFFSET;
-	// 		}
-	// 		data = ag->packet.data;
-	// 		for (i = 0; i < sending_now; i++) {
-	// 			if (ag->pattern == PATTERN_ANALOG_RANDOM)
-	// 				data[i] = (rand() % 1000) * amplitude + offset;
-	// 			else
-	// 				data[i] = pattern->data[ag_pattern_pos + i] * amplitude + offset;
-	// 		}
-	// 	} else {
-	// 		/* Amplitude and offset unchanged, use the fast way. */
-	// 		ag->packet.data = pattern->data + ag_pattern_pos;
-	// 	}
-	// 	ag->packet.num_samples = sending_now;
-	// 	sr_session_send(sdi, &packet);
-
-	// 	/* Whichever channel group gets there first. */
-	// 	*analog_sent = MAX(*analog_sent, sending_now);
-	// } else {
-	// 	ag_pattern_pos = analog_pos % pattern->num_samples;
-	// 	to_avg = MIN(analog_todo, pattern->num_samples - ag_pattern_pos);
-	// 	if (ag->pattern == PATTERN_ANALOG_RANDOM) {
-	// 		amplitude = ag->amplitude / 500.0;
-	// 		offset = ag->offset - DEFAULT_ANALOG_OFFSET - ag->amplitude;
-	// 	} else {
-	// 		amplitude = ag->amplitude / DEFAULT_ANALOG_AMPLITUDE;
-	// 		offset = ag->offset - DEFAULT_ANALOG_OFFSET;
-	// 	}
-
-	// 	for (i = 0; i < to_avg; i++) {
-	// 		if (ag->pattern == PATTERN_ANALOG_RANDOM)
-	// 			value = (rand() % 1000) * amplitude + offset;
-	// 		else
-	// 			value = *(pattern->data + ag_pattern_pos + i) * amplitude + offset;
-	// 		ag->avg_val = (ag->avg_val + value) / 2;
-	// 		ag->num_avgs++;
-	// 		/* Time to send averaged data? */
-	// 		if ((devc->avg_samples > 0) && (ag->num_avgs >= devc->avg_samples))
-	// 			goto do_send;
-	// 	}
-
-	// 	if (devc->avg_samples == 0) {
-	// 		/*
-	// 		 * We're averaging all the samples, so wait with
-	// 		 * sending until the very end.
-	// 		 */
-	// 		*analog_sent = ag->num_avgs;
-	// 		return;
-	// 	}
 	
 	sr_err("send_analog_packet(): sdi=%p, devc=%p, ag=%p", (void *)sdi, (void *)devc, (void *)ag);
     sr_err("send_analog_packet(): ag->pattern=%d", ag->pattern);
@@ -730,16 +663,20 @@ if (!devc) {
 
 		// Amplitude/offset handling
 		amplitude = (ag->pattern == PATTERN_ANALOG_RANDOM) ?
-			(ag->amplitude / 500.0f) :
+			(ag->amplitude / 1.0f) :
 			(ag->amplitude / DEFAULT_ANALOG_AMPLITUDE);
 		offset = (ag->pattern == PATTERN_ANALOG_RANDOM) ?
 			(ag->offset - DEFAULT_ANALOG_OFFSET - ag->amplitude) :
 			(ag->offset - DEFAULT_ANALOG_OFFSET);
 
+		// Debug print
+		printf("DEBUG: amplitude = %f, offset = %f\n", amplitude, offset);	
+		
+
 		data = ag->packet.data;
 		for (i = 0; i < sending_now; i++) {
 			// Use binary data for RANDOM instead of rand()
-			data[i] = pattern->data[ag_pattern_pos + i] * amplitude + offset;
+			data[i] = pattern->data[ag_pattern_pos + i];
 		}
 
 		ag->packet.num_samples = sending_now;
@@ -750,14 +687,14 @@ if (!devc) {
 		to_avg = MIN(analog_todo, pattern->num_samples - ag_pattern_pos);
 
 		amplitude = (ag->pattern == PATTERN_ANALOG_RANDOM) ?
-			(ag->amplitude / 500.0f) :
+			(ag->amplitude / 1.0f) :
 			(ag->amplitude / DEFAULT_ANALOG_AMPLITUDE);
 		offset = (ag->pattern == PATTERN_ANALOG_RANDOM) ?
 			(ag->offset - DEFAULT_ANALOG_OFFSET - ag->amplitude) :
 			(ag->offset - DEFAULT_ANALOG_OFFSET);
 
 		for (i = 0; i < to_avg; i++) {
-			value = pattern->data[ag_pattern_pos + i] * amplitude + offset;
+			value = pattern->data[ag_pattern_pos + i] ;
 			ag->avg_val = (ag->avg_val + value) / 2.0f;
 			ag->num_avgs++;
 
@@ -781,59 +718,7 @@ do_send:
 	}
 }
 
-// static void send_analog_packet(struct analog_gen *ag,
-// 		struct sr_dev_inst *sdi, uint64_t *analog_sent,
-// 		uint64_t analog_pos, uint64_t analog_todo)
-// {
-// 	struct dev_context *devc = sdi->priv;
-// 	struct analog_pattern *pattern = devc->analog_patterns[PATTERN_BINARY];
 
-// 	if (!devc || !pattern || pattern->num_samples == 0) {
-// 		sr_err("send_analog_packet(): Missing devc or analog pattern.");
-// 		return;
-// 	}
-
-	
-// 	if (!pattern) {
-// 		sr_err("send_analog_packet(): pattern (PATTERN_BINARY) is NULL.");
-// 		return;
-// 	}
-// 	if (pattern->num_samples == 0) {
-// 		sr_err("send_analog_packet(): pattern has 0 samples.");
-// 		return;
-// 	}
-
-
-// 	struct sr_analog_meaning *meaning = g_malloc0(sizeof(struct sr_analog_meaning));
-// 	meaning->mq = SR_MQ_VOLTAGE;
-// 	meaning->mqflags = 0;
-// 	meaning->unit = SR_UNIT_VOLT;
-// 	meaning->channels = NULL;
-
-// 	if (ag && ag->ch)
-// 		meaning->channels = g_slist_append(NULL, ag->ch);
-
-// 	struct sr_datafeed_analog analog_packet = {
-// 		.data = pattern->data,
-// 		.num_samples = pattern->num_samples,
-// 		.meaning = meaning
-// 	};
-
-// 	struct sr_datafeed_packet packet = {
-// 		.type = SR_DF_ANALOG,
-// 		.payload = &analog_packet
-// 	};
-
-// 	sr_session_send(sdi, &packet);
-// 	std_session_send_df_end(sdi);
-
-// 	*analog_sent = pattern->num_samples;
-
-// 	// Free the allocated meaning and channels list
-// 	if (meaning->channels)
-// 		g_slist_free(meaning->channels);
-// 	g_free(meaning);
-// }
 
 
 
