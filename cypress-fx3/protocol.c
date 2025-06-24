@@ -39,17 +39,14 @@ struct cmd_start_acquisition {
 
 
 #define PREAMBLE 0xABCD    
-#define HEADER_MIN_SIZE 10   
+#define HEADER_SIZE 16       // Up to start of Sample[0]
 #define MAX_PACKET_SIZE 1024  
-#define SAMPLE_SIZE 10
-#define HEADER_SIZE 10  
-
+#define MAX_SAFE_SAMPLES 10  // Only up to 10 analog samples per your spec
 
 static uint16_t read_uint16_be(const uint8_t *buf) {
     return (buf[0] << 8) | buf[1];
 }
 
-// checksum calculation
 static uint16_t calculate_checksum(const uint8_t *data, size_t length) {
     uint16_t sum = 0;
     for (size_t i = 0; i < length; i++) {
@@ -58,51 +55,84 @@ static uint16_t calculate_checksum(const uint8_t *data, size_t length) {
     return sum & 0xFFFF;
 }
 
-
 int fx3driver_parse_next_packet(const uint8_t *data, size_t len, struct parsed_packet *pkt)
 {
-    if (len < HEADER_MIN_SIZE)
-        return 0;
+    sr_err("Entered fx3driver_parse_next_packet (len=%zu)", len);
 
-    if (read_uint16_be(data) != PREAMBLE)
+    if (!data || !pkt) {
+        sr_err("Null pointer input (data or pkt).");
+        return 0;
+    }
+
+    if (len < HEADER_SIZE + 2) {
+        sr_err("Insufficient data: %zu bytes, need at least %d.", len, HEADER_SIZE + 2);
+        return 0;
+    }
+
+    if (read_uint16_be(data) != PREAMBLE) {
+        sr_err("Invalid preamble: 0x%04X", read_uint16_be(data));
         return 2;
+    }
+
+    uint16_t channel_field = read_uint16_be(&data[2]);
+    pkt->channel_type = (channel_field >> 8);        // 0xFF
+    pkt->channel_number = (channel_field & 0xFF);    // 0x05
+    sr_err("Channel type: 0x%02X, number: %u", pkt->channel_type, pkt->channel_number);
+
+    uint16_t ts_lo = read_uint16_be(&data[4]);
+    uint16_t ts_hi = read_uint16_be(&data[6]);
+    pkt->timestamp = ((uint32_t)ts_hi << 16) | ts_lo;
+    sr_err("Timestamp: 0x%08X", pkt->timestamp);
 
     uint16_t packetLength = read_uint16_be(&data[8]);
-    if (packetLength < 18 || packetLength > MAX_PACKET_SIZE || len < packetLength)
+    sr_err("Packet length: %u", packetLength);
+
+    if (packetLength < HEADER_SIZE + 2 || packetLength > MAX_PACKET_SIZE || len < packetLength) {
+        sr_err("Invalid packet length: %u (len=%zu)", packetLength, len);
         return 2;
+    }
 
     uint16_t checksum = calculate_checksum(data, packetLength - 2);
     uint16_t expected = read_uint16_be(&data[packetLength - 2]);
-    if (checksum != expected)
+    sr_err("Checksum calc: got=0x%04X, expected=0x%04X", checksum, expected);
+
+    if (checksum != expected) {
+        sr_err("Checksum mismatch.");
         return 2;
-
-    pkt->channel_type = data[2];  // 0x00 = digital, 0xFF = analog
-    pkt->channel_number = data[3];
-    uint16_t timestampLow = read_uint16_be(&data[4]);
-    uint16_t timestampHigh = read_uint16_be(&data[6]);
-    pkt->timestamp = ((uint32_t)timestampHigh << 16) | timestampLow;
-
-    if (pkt->channel_type == 0x00) {
-        // DIGITAL
-        pkt->num_samples = packetLength - 18;  // 1 byte per sample
-        pkt->digital_samples = g_malloc0(pkt->num_samples);
-        memcpy(pkt->digital_samples, &data[16], pkt->num_samples);
-    } else if (pkt->channel_type == 0xFF) {
-        // ANALOG
-        pkt->num_samples = (packetLength - 18) / 2;
-        pkt->samples = g_malloc0(pkt->num_samples * sizeof(float));
-        for (int i = 0; i < pkt->num_samples; i++) {
-            uint16_t raw = read_uint16_be(&data[16 + i * 2]);
-            pkt->samples[i] = raw * 3.3f / 65535.0f;
-        }
-    } else {
-        return 2;  // unknown channel type
     }
 
+    pkt->samples = NULL;
+    pkt->digital_samples = NULL;
+    pkt->num_samples = 0;
+
+    if (pkt->channel_type != 0xFF) {
+        sr_err("Unsupported channel type: 0x%02X", pkt->channel_type);
+        return 2;
+    }
+
+    pkt->num_samples = (packetLength - HEADER_SIZE - 2) / 2;
+    sr_err("Parsed analog sample count: %zu", pkt->num_samples);
+
+    if (pkt->num_samples == 0 || pkt->num_samples > MAX_SAFE_SAMPLES) {
+        sr_err("Invalid sample count: %zu", pkt->num_samples);
+        return 2;
+    }
+
+    pkt->samples = g_malloc0(pkt->num_samples * sizeof(float));
+    if (!pkt->samples) {
+        sr_err("Memory allocation failed for analog samples.");
+        return 2;
+    }
+
+    for (size_t i = 0; i < pkt->num_samples; i++) {
+        uint16_t raw = read_uint16_be(&data[HEADER_SIZE + i * 2]);
+        pkt->samples[i] = raw * 3.3f / 65535.0f;
+        sr_err("Sample[%zu] raw=0x%04X, voltage=%.3f V", i, raw, pkt->samples[i]);
+    }
+
+    sr_err("Packet parsed successfully.");
     return packetLength;
 }
-
-
 
 
 
@@ -390,57 +420,141 @@ static void resubmit_transfer(struct libusb_transfer *transfer)
 
 }
 
+
 static void mso_send_data_proc(struct sr_dev_inst *sdi,
 	uint8_t *data, size_t length, size_t sample_width)
 {
-	size_t i;
-	struct dev_context *devc;
-	struct sr_datafeed_analog analog;
-	struct sr_analog_encoding encoding;
-	struct sr_analog_meaning meaning;
-	struct sr_analog_spec spec;
+	struct dev_context *devc = sdi->priv;
+	struct parsed_packet pkt;
 
-	(void)sample_width;
+	size_t offset = 0;
+	sr_err("mso_send_data_proc started ");
+	while (offset + HEADER_SIZE <= length) {
+		int parsed_len = fx3driver_parse_next_packet(&data[offset], length - offset, &pkt);
+		if (parsed_len <= 0) {
+			sr_err("Invalid or incomplete packet at offset %zu.", offset);
+			break;
+		}
 
-	devc = sdi->priv;
+		if (pkt.channel_type == 0xFF) {
+			// Analog
+			struct sr_datafeed_analog analog;
+			struct sr_analog_encoding encoding;
+			struct sr_analog_meaning meaning;
+			struct sr_analog_spec spec;
 
-	length /= 2;
+			sr_analog_init(&analog, &encoding, &meaning, &spec, 1);
+			analog.meaning->channels = devc->enabled_analog_channels;
+			analog.meaning->mq = SR_MQ_VOLTAGE;
+			analog.meaning->unit = SR_UNIT_VOLT;
+			analog.meaning->mqflags = 0;
+			analog.num_samples = pkt.num_samples;
+			sr_err("Gettting analog num_samples = %d", pkt.num_samples);
 
-	/* Send the logic */
-	for (i = 0; i < length; i++) {
-		devc->logic_buffer[i] = data[i * 2];
-		/* Rescale to -10V - +10V from 0-255. */
-		devc->analog_buffer[i] = (data[i * 2 + 1] - 128.0f) / 12.8f;
-	};
+			if (pkt.num_samples > devc->analog_buffer) {
+				devc->analog_buffer = g_realloc(devc->analog_buffer, pkt.num_samples * sizeof(float));
+				devc->analog_buffer = pkt.num_samples;
+			}
 
-	const struct sr_datafeed_logic logic = {
-		.length = length,
-		.unitsize = 1,
-		.data = devc->logic_buffer
-	};
+			
 
-	const struct sr_datafeed_packet logic_packet = {
-		.type = SR_DF_LOGIC,
-		.payload = &logic
-	};
+			memcpy(devc->analog_buffer, pkt.samples, pkt.num_samples * sizeof(float));
+			analog.data = devc->analog_buffer;
 
-	sr_session_send(sdi, &logic_packet);
+			const struct sr_datafeed_packet analog_packet = {
+				.type = SR_DF_ANALOG,
+				.payload = &analog
+			};
 
-	sr_analog_init(&analog, &encoding, &meaning, &spec, 2);
-	analog.meaning->channels = devc->enabled_analog_channels;
-	analog.meaning->mq = SR_MQ_VOLTAGE;
-	analog.meaning->unit = SR_UNIT_VOLT;
-	analog.meaning->mqflags = 0 /* SR_MQFLAG_DC */;
-	analog.num_samples = length;
-	analog.data = devc->analog_buffer;
+			sr_session_send(sdi, &analog_packet);
+		}
+		else if (pkt.channel_type == 0x00) {
+			// Digital
+			if (pkt.num_samples > devc->logic_buffer) {
+				devc->logic_buffer = g_realloc(devc->logic_buffer, pkt.num_samples);
+				devc->logic_buffer = pkt.num_samples;
+				sr_err("Gettting Digital num_samples = %d", pkt.num_samples);
+			}
 
-	const struct sr_datafeed_packet analog_packet = {
-		.type = SR_DF_ANALOG,
-		.payload = &analog
-	};
+			memcpy(devc->logic_buffer, pkt.digital_samples, pkt.num_samples);
 
-	sr_session_send(sdi, &analog_packet);
+			const struct sr_datafeed_logic logic = {
+				.length = pkt.num_samples,
+				.unitsize = 1,
+				.data = devc->logic_buffer
+			};
+
+			const struct sr_datafeed_packet logic_packet = {
+				.type = SR_DF_LOGIC,
+				.payload = &logic
+			};
+
+			sr_session_send(sdi, &logic_packet);
+		} else {
+			sr_err("Unknown channel type: 0x%02X", pkt.channel_type);
+		}
+
+		// Free parsed memory
+		g_free(pkt.samples);
+		g_free(pkt.digital_samples);
+
+		offset += parsed_len;
+	}
 }
+
+
+
+// static void mso_send_data_proc(struct sr_dev_inst *sdi,
+// 	uint8_t *data, size_t length, size_t sample_width)
+// {
+// 	size_t i;
+// 	struct dev_context *devc;
+// 	struct sr_datafeed_analog analog;
+// 	struct sr_analog_encoding encoding;
+// 	struct sr_analog_meaning meaning;
+// 	struct sr_analog_spec spec;
+
+// 	(void)sample_width;
+
+// 	devc = sdi->priv;
+
+// 	length /= 2;
+
+// 	/* Send the logic */
+// 	for (i = 0; i < length; i++) {
+// 		devc->logic_buffer[i] = data[i * 2];
+// 		/* Rescale to -10V - +10V from 0-255. */
+// 		devc->analog_buffer[i] = (data[i * 2 + 1] - 128.0f) / 12.8f;
+// 	};
+
+// 	const struct sr_datafeed_logic logic = {
+// 		.length = length,
+// 		.unitsize = 1,
+// 		.data = devc->logic_buffer
+// 	};
+
+// 	const struct sr_datafeed_packet logic_packet = {
+// 		.type = SR_DF_LOGIC,
+// 		.payload = &logic
+// 	};
+
+// 	sr_session_send(sdi, &logic_packet);
+
+// 	sr_analog_init(&analog, &encoding, &meaning, &spec, 2);
+// 	analog.meaning->channels = devc->enabled_analog_channels;
+// 	analog.meaning->mq = SR_MQ_VOLTAGE;
+// 	analog.meaning->unit = SR_UNIT_VOLT;
+// 	analog.meaning->mqflags = 0 /* SR_MQFLAG_DC */;
+// 	analog.num_samples = length;
+// 	analog.data = devc->analog_buffer;
+
+// 	const struct sr_datafeed_packet analog_packet = {
+// 		.type = SR_DF_ANALOG,
+// 		.payload = &analog
+// 	};
+
+// 	sr_session_send(sdi, &analog_packet);
+// }
 
 static void la_send_data_proc(struct sr_dev_inst *sdi,
 	uint8_t *data, size_t length, size_t sample_width)
@@ -459,130 +573,181 @@ static void la_send_data_proc(struct sr_dev_inst *sdi,
 	sr_session_send(sdi, &packet);
 }
 
-// static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
-// {
-// 	struct sr_dev_inst *sdi;
-// 	struct dev_context *devc;
-// 	gboolean packet_has_error = FALSE;
-// 	unsigned int num_samples;
-// 	int trigger_offset, cur_sample_count, unitsize, processed_samples;
-// 	int pre_trigger_samples;
+static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
+{
+	struct sr_dev_inst *sdi;
+	struct dev_context *devc;
+	gboolean packet_has_error = FALSE;
+	unsigned int num_samples;
+	int trigger_offset, cur_sample_count, unitsize, processed_samples;
+	int pre_trigger_samples;
 
-// 	sdi = transfer->user_data;
-// 	devc = sdi->priv;
+	sdi = transfer->user_data;
+	devc = sdi->priv;
 
-// 	/*
-// 	 * If acquisition has already ended, just free any queued up
-// 	 * transfer that come in.
-// 	 */
-// 	if (devc->acq_aborted) {
-// 		free_transfer(transfer);
-// 		return;
-// 	}
+	/*
+	 * If acquisition has already ended, just free any queued up
+	 * transfer that come in.
+	 */
+	if (devc->acq_aborted) {
+		free_transfer(transfer);
+		return;
+	}
 
-// 	sr_dbg("receive_transfer(): status %s received %d bytes.",
-// 		libusb_error_name(transfer->status), transfer->actual_length);
+	sr_err("receive_transfer(): status %s received %d bytes.",
+		libusb_error_name(transfer->status), transfer->actual_length);
 
-// 	/* Save incoming transfer before reusing the transfer struct. */
-// 	unitsize = devc->sample_wide ? 2 : 1;
-// 	cur_sample_count = transfer->actual_length / unitsize;
-// 	processed_samples = 0;
 
-// 	switch (transfer->status) {
-// 	case LIBUSB_TRANSFER_NO_DEVICE:
-// 		cypress_fx3_abort_acquisition(devc);
-// 		free_transfer(transfer);
-// 		return;
-// 	case LIBUSB_TRANSFER_COMPLETED:
-// 	case LIBUSB_TRANSFER_TIMED_OUT: /* We may have received some data though. */
-// 		break;
-// 	default:
-// 		packet_has_error = TRUE;
-// 		break;
-// 	}
 
-// 	if (transfer->actual_length == 0 || packet_has_error) {
-// 		devc->empty_transfer_count++;
-// 		if (devc->empty_transfer_count > MAX_EMPTY_TRANSFERS) {
-// 			/*
-// 			 * The FX2 gave up. End the acquisition, the frontend
-// 			 * will work out that the samplecount is short.
-// 			 */
-// 			cypress_fx3_abort_acquisition(devc);
-// 			free_transfer(transfer);
-// 		} else {
-// 			resubmit_transfer(transfer);
-// 		}
-// 		return;
-// 	} else {
-// 		devc->empty_transfer_count = 0;
-// 	}
+	if (transfer->actual_length > 0) {
+    size_t offset = 0;
+    while (offset + HEADER_SIZE <= (size_t)transfer->actual_length) {
+        struct parsed_packet pkt;
+        int parsed_len = fx3driver_parse_next_packet(&transfer->buffer[offset],
+                                                     transfer->actual_length - offset,
+                                                     &pkt);
+        if (parsed_len <= 0) {
+            sr_err("Corrupt or incomplete packet at offset %zu", offset);
+            break;
+        }
 
-// check_trigger:
-// 	if (devc->trigger_fired) {
-// 		if (!devc->limit_samples || devc->sent_samples < devc->limit_samples) {
-// 			/* Send the incoming transfer to the session bus. */
-// 			num_samples = cur_sample_count - processed_samples;
-// 			if (devc->limit_samples && devc->sent_samples + num_samples > devc->limit_samples)
-// 				num_samples = devc->limit_samples - devc->sent_samples;
+        sr_err("FX3 packet: type=0x%02X, ch=%u, timestamp=0x%08X, samples=%zu",
+               pkt.channel_type, pkt.channel_number, pkt.timestamp, (size_t)pkt.num_samples);
 
-// 			devc->send_data_proc(sdi, (uint8_t *)transfer->buffer + processed_samples * unitsize,
-// 				num_samples * unitsize, unitsize);
-// 			devc->sent_samples += num_samples;
-// 			processed_samples += num_samples;
-// 		}
-// 	} else {
-// 		trigger_offset = soft_trigger_logic_check(devc->stl,
-// 			transfer->buffer + processed_samples * unitsize,
-// 			transfer->actual_length - processed_samples * unitsize,
-// 			&pre_trigger_samples);
-// 		if (trigger_offset > -1) {
-// 			std_session_send_df_frame_begin(sdi);
-// 			devc->sent_samples += pre_trigger_samples;
-// 			num_samples = cur_sample_count - processed_samples - trigger_offset;
-// 			if (devc->limit_samples &&
-// 					devc->sent_samples + num_samples > devc->limit_samples)
-// 				num_samples = devc->limit_samples - devc->sent_samples;
+        // Optionally print sample values
+        if (pkt.channel_type == 0xFF && pkt.samples) {
+            for (size_t i = 0; i < pkt.num_samples && i < 10; i++) {
+                sr_err("  A[%zu] = %.3f V", i, pkt.samples[i]);
+            }
+        } else if (pkt.channel_type == 0x00 && pkt.digital_samples) {
+            for (size_t i = 0; i < pkt.num_samples && i < 10; i++) {
+                sr_err("  D[%zu] = 0x%02X", i, pkt.digital_samples[i]);
+            }
+        }
 
-// 			devc->send_data_proc(sdi, (uint8_t *)transfer->buffer
-// 					+ processed_samples * unitsize
-// 					+ trigger_offset * unitsize,
-// 					num_samples * unitsize, unitsize);
-// 			devc->sent_samples += num_samples;
-// 			processed_samples += trigger_offset + num_samples;
+        // Free after print
+        g_free(pkt.samples);
+        g_free(pkt.digital_samples);
 
-// 			devc->trigger_fired = TRUE;
-// 		}
-// 	}
+        offset += parsed_len;
+    	}
+	}	
 
-// 	const int frame_ended = devc->limit_samples && (devc->sent_samples >= devc->limit_samples);
-// 	const int final_frame = devc->limit_frames && (devc->num_frames >= (devc->limit_frames - 1));
 
-// 	if (frame_ended) {
-// 		devc->num_frames++;
-// 		devc->sent_samples = 0;
-// 		devc->trigger_fired = FALSE;
-// 		std_session_send_df_frame_end(sdi);
 
-// 		/* There may be another trigger in the remaining data, go back and check for it */
-// 		if (processed_samples < cur_sample_count) {
-// 			/* Reset the trigger stage */
-// 			if (devc->stl)
-// 				devc->stl->cur_stage = 0;
-// 			else {
-// 				std_session_send_df_frame_begin(sdi);
-// 				devc->trigger_fired = TRUE;
-// 			}
-// 			if (!final_frame)
-// 				goto check_trigger;
-// 		}
-// 	}
-// 	if (frame_ended && final_frame) {
-// 		cypress_fx3_abort_acquisition(devc);
-// 		free_transfer(transfer);
-// 	} else
-// 		resubmit_transfer(transfer);
-// }
+
+
+
+
+
+
+
+
+
+
+
+	/* Save incoming transfer before reusing the transfer struct. */
+	unitsize = devc->sample_wide ? 2 : 1;
+	cur_sample_count = transfer->actual_length / unitsize;
+	processed_samples = 0;
+
+
+
+	switch (transfer->status) {
+	case LIBUSB_TRANSFER_NO_DEVICE:
+		cypress_fx3_abort_acquisition(devc);
+		free_transfer(transfer);
+		return;
+	case LIBUSB_TRANSFER_COMPLETED:
+	case LIBUSB_TRANSFER_TIMED_OUT: /* We may have received some data though. */
+		break;
+	default:
+		packet_has_error = TRUE;
+		break;
+	}
+
+	if (transfer->actual_length == 0 || packet_has_error) {
+		devc->empty_transfer_count++;
+		if (devc->empty_transfer_count > MAX_EMPTY_TRANSFERS) {
+			/*
+			 * The FX3 gave up. End the acquisition, the frontend
+			 * will work out that the samplecount is short.
+			 */
+			cypress_fx3_abort_acquisition(devc);
+			free_transfer(transfer);
+		} else {
+			resubmit_transfer(transfer);
+		}
+		return;
+	} else {
+		devc->empty_transfer_count = 0;
+	}
+
+check_trigger:
+	if (devc->trigger_fired) {
+		if (!devc->limit_samples || devc->sent_samples < devc->limit_samples) {
+			/* Send the incoming transfer to the session bus. */
+			num_samples = cur_sample_count - processed_samples;
+			if (devc->limit_samples && devc->sent_samples + num_samples > devc->limit_samples)
+				num_samples = devc->limit_samples - devc->sent_samples;
+
+			devc->send_data_proc(sdi, (uint8_t *)transfer->buffer + processed_samples * unitsize,
+				num_samples * unitsize, unitsize);
+			devc->sent_samples += num_samples;
+			processed_samples += num_samples;
+		}
+	} else {
+		trigger_offset = soft_trigger_logic_check(devc->stl,
+			transfer->buffer + processed_samples * unitsize,
+			transfer->actual_length - processed_samples * unitsize,
+			&pre_trigger_samples);
+		if (trigger_offset > -1) {
+			std_session_send_df_frame_begin(sdi);
+			devc->sent_samples += pre_trigger_samples;
+			num_samples = cur_sample_count - processed_samples - trigger_offset;
+			if (devc->limit_samples &&
+					devc->sent_samples + num_samples > devc->limit_samples)
+				num_samples = devc->limit_samples - devc->sent_samples;
+
+			devc->send_data_proc(sdi, (uint8_t *)transfer->buffer
+					+ processed_samples * unitsize
+					+ trigger_offset * unitsize,
+					num_samples * unitsize, unitsize);
+			devc->sent_samples += num_samples;
+			processed_samples += trigger_offset + num_samples;
+
+			devc->trigger_fired = TRUE;
+		}
+	}
+
+	const int frame_ended = devc->limit_samples && (devc->sent_samples >= devc->limit_samples);
+	const int final_frame = devc->limit_frames && (devc->num_frames >= (devc->limit_frames - 1));
+
+	if (frame_ended) {
+		devc->num_frames++;
+		devc->sent_samples = 0;
+		devc->trigger_fired = FALSE;
+		std_session_send_df_frame_end(sdi);
+
+		/* There may be another trigger in the remaining data, go back and check for it */
+		if (processed_samples < cur_sample_count) {
+			/* Reset the trigger stage */
+			if (devc->stl)
+				devc->stl->cur_stage = 0;
+			else {
+				std_session_send_df_frame_begin(sdi);
+				devc->trigger_fired = TRUE;
+			}
+			if (!final_frame)
+				goto check_trigger;
+		}
+	}
+	if (frame_ended && final_frame) {
+		cypress_fx3_abort_acquisition(devc);
+		free_transfer(transfer);
+	} else
+		resubmit_transfer(transfer);
+}
 
 
 
@@ -590,41 +755,41 @@ static void la_send_data_proc(struct sr_dev_inst *sdi,
 
 // Parser function **************************************************************************
 
-static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
-{
-	struct sr_dev_inst *sdi = transfer->user_data;
-	struct dev_context *devc = sdi->priv;
+// static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
+// {
+// 	struct sr_dev_inst *sdi = transfer->user_data;
+// 	struct dev_context *devc = sdi->priv;
 
-	if (transfer->status != LIBUSB_TRANSFER_COMPLETED) {
-		// handle error (log, retry, etc.)
-		return;
-	}
+// 	if (transfer->status != LIBUSB_TRANSFER_COMPLETED) {
+// 		// handle error (log, retry, etc.)
+// 		return;
+// 	}
 
-	uint8_t *ptr = transfer->buffer;
-	size_t remaining = transfer->actual_length;
+// 	uint8_t *ptr = transfer->buffer;
+// 	size_t remaining = transfer->actual_length;
 
-	while (remaining >= HEADER_SIZE + SAMPLE_SIZE) {
-		// ---- Example parsing, adjust to match your packet format ----
-		// For example: [2 bytes: payload_length] + [2 bytes: flags or timestamp]
-		uint16_t payload_length = ptr[0] | (ptr[1] << 8);  // Little-endian
+// 	while (remaining >= HEADER_SIZE + SAMPLE_SIZE) {
+// 		// ---- Example parsing, adjust to match your packet format ----
+// 		// For example: [2 bytes: payload_length] + [2 bytes: flags or timestamp]
+// 		uint16_t payload_length = ptr[0] | (ptr[1] << 8);  // Little-endian
 
-		if (payload_length % SAMPLE_SIZE != 0 || payload_length + HEADER_SIZE > remaining) {
-			// invalid or incomplete packet, break or skip
-			break;
-		}
+// 		if (payload_length % SAMPLE_SIZE != 0 || payload_length + HEADER_SIZE > remaining) {
+// 			// invalid or incomplete packet, break or skip
+// 			break;
+// 		}
 
-		uint8_t *sample_data = ptr + HEADER_SIZE;
+// 		uint8_t *sample_data = ptr + HEADER_SIZE;
 
-		// Dispatch just the sample portion to the mso_send_data_proc
-		mso_send_data_proc(sdi, sample_data, payload_length, SAMPLE_SIZE);
+// 		// Dispatch just the sample portion to the mso_send_data_proc
+// 		mso_send_data_proc(sdi, sample_data, payload_length, SAMPLE_SIZE);
 
-		ptr += HEADER_SIZE + payload_length;
-		remaining -= HEADER_SIZE + payload_length;
-	}
+// 		ptr += HEADER_SIZE + payload_length;
+// 		remaining -= HEADER_SIZE + payload_length;
+// 	}
 
-	// Resubmit transfer to keep receiving more data
-	libusb_submit_transfer(transfer);
-}
+// 	// Resubmit transfer to keep receiving more data
+// 	libusb_submit_transfer(transfer);
+// }
 
 // **************************************************************************
 
@@ -756,7 +921,7 @@ static int start_transfers(const struct sr_dev_inst *sdi)
 	num_transfers = get_number_of_transfers(devc);
 
 	size = get_buffer_size(devc);
-	sr_info("num_transfers: %d, buffer_size: %d", num_transfers,size);
+	sr_info("num_transfers: %d, buffer_size: %zu", num_transfers,size);
 	devc->submitted_transfers = 0;
 
 	devc->transfers = g_try_malloc0(sizeof(*devc->transfers) * num_transfers);
