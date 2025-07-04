@@ -68,13 +68,13 @@ int fx3driver_parse_next_packet(const uint8_t *data, size_t len, struct parsed_p
 {
 
 	// Display raw data
-    for (int i=0;i<len;i++) {
-		printf("%02X ", data[i]);
-		if (i % 30 == 0) {
-			printf("\n");
+    // for (int i=0;i<len;i++) {
+	// 	printf("%02X ", data[i]);
+	// 	if (i % 30 == 0) {
+	// 		printf("\n");
 		
-		}
-	}
+	// 	}
+	// }
 
 	// return 0;
 	sr_err("Entered fx3driver_parse_next_packet (len=%zu)", len);
@@ -131,16 +131,20 @@ int fx3driver_parse_next_packet(const uint8_t *data, size_t len, struct parsed_p
 
 	uint16_t channel_field = read_uint16_be(&pkt_data[0]);
 	pkt->channel_type = (channel_field >> 8);
-	sr_err("Chnnel type: 0x%04X", pkt->channel_type);
+	sr_err("Channel type: 0x%04X", pkt->channel_type);
 
 	pkt->channel_number = channel_field & 0xFF;
-	sr_err("Cannel number: 0x%04X", pkt->channel_number);
+	sr_err("Channel number: 0x%04X", pkt->channel_number);
 
 	uint16_t ts_lo = read_uint16_be(&pkt_data[2]);
 	sr_err("ts_lo: 0x%04X", ts_lo);
 
 	uint16_t ts_hi = read_uint16_be(&pkt_data[4]);
 	sr_err("ts_hi: 0x%04X", ts_hi);
+
+
+	pkt->ts_lo = ts_lo;
+	pkt->ts_hi = ts_hi;
 
 	uint16_t packet_length = read_uint16_be(&pkt_data[6]);
 	if (packet_length < 20 || len - offset < packet_length) {
@@ -183,6 +187,9 @@ int fx3driver_parse_next_packet(const uint8_t *data, size_t len, struct parsed_p
     uint16_t raw = read_uint16_be(&pkt_data[14 + i * 2]);
     uint8_t bit = (raw & 0x01) ? 1 : 0;
     pkt->digital_samples[i] = bit << pkt->channel_number;
+	//pkt->digital_samples[i] = 0xFF;
+	//pkt->digital_samples[i] = raw & 0xFF;
+
     sr_err("Sample[%zu] raw=0x%04X, shifted=0x%02X", i, raw, pkt->digital_samples[i]);
     }
 
@@ -196,6 +203,9 @@ int fx3driver_parse_next_packet(const uint8_t *data, size_t len, struct parsed_p
     //     pkt->digital_samples = NULL;
     //     return 0;
     // }
+
+	//pkt->digital_samples[i] = 0xFF;
+	//pkt->digital_samples[i] = raw & 0xFF;
 
     sr_err("Digital packet parsed successfully");
     return offset + packet_length;
@@ -594,16 +604,21 @@ static void mso_send_data_proc(struct sr_dev_inst *sdi,
 				sr_err("Gettting Digital num_samples = %d", pkt.num_samples);
 			}
 
-			for (size_t i = 0; i < pkt.num_samples && i < 4; i++) {
+			for (size_t i = 0; i < pkt.num_samples; i++) {
     		sr_err("Digital sample[%zu] = 0x%02X", i, pkt.digital_samples[i]);
 			}
 
+		} else {
+			sr_err("Unknown channel type: 0x%02X", pkt.channel_type);
+		}
 
-			memcpy(devc->logic_buffer, pkt.digital_samples, pkt.num_samples);
+		
+
+		memcpy(devc->logic_buffer, pkt.digital_samples, pkt.num_samples * sizeof(uint16_t));
 
 			const struct sr_datafeed_logic logic = {
 				.length = pkt.num_samples,
-				.unitsize = 1,
+				.unitsize = 2,
 				.data = devc->logic_buffer
 			};
 
@@ -612,10 +627,7 @@ static void mso_send_data_proc(struct sr_dev_inst *sdi,
 				.payload = &logic
 			};
 
-			sr_session_send(sdi, &logic_packet);
-		} else {
-			sr_err("Unknown channel type: 0x%02X", pkt.channel_type);
-		}
+		sr_session_send(sdi, &logic_packet);
 
 		// Free parsed memory
 		g_free(pkt.samples);
@@ -623,63 +635,14 @@ static void mso_send_data_proc(struct sr_dev_inst *sdi,
 
 		offset += parsed_len;
 
+
+
 		
 	}
 }
 
 
 
-// static void mso_send_data_proc(struct sr_dev_inst *sdi,
-// 	uint8_t *data, size_t length, size_t sample_width)
-// {
-// 	size_t i;
-// 	struct dev_context *devc;
-// 	struct sr_datafeed_analog analog;
-// 	struct sr_analog_encoding encoding;
-// 	struct sr_analog_meaning meaning;
-// 	struct sr_analog_spec spec;
-
-// 	(void)sample_width;
-
-// 	devc = sdi->priv;
-
-// 	length /= 2;
-
-// 	/* Send the logic */
-// 	for (i = 0; i < length; i++) {
-// 		devc->logic_buffer[i] = data[i * 2];
-// 		/* Rescale to -10V - +10V from 0-255. */
-// 		devc->analog_buffer[i] = (data[i * 2 + 1] - 128.0f) / 12.8f;
-// 	};
-
-// 	const struct sr_datafeed_logic logic = {
-// 		.length = length,
-// 		.unitsize = 1,
-// 		.data = devc->logic_buffer
-// 	};
-
-// 	const struct sr_datafeed_packet logic_packet = {
-// 		.type = SR_DF_LOGIC,
-// 		.payload = &logic
-// 	};
-
-// 	sr_session_send(sdi, &logic_packet);
-
-// 	sr_analog_init(&analog, &encoding, &meaning, &spec, 2);
-// 	analog.meaning->channels = devc->enabled_analog_channels;
-// 	analog.meaning->mq = SR_MQ_VOLTAGE;
-// 	analog.meaning->unit = SR_UNIT_VOLT;
-// 	analog.meaning->mqflags = 0 /* SR_MQFLAG_DC */;
-// 	analog.num_samples = length;
-// 	analog.data = devc->analog_buffer;
-
-// 	const struct sr_datafeed_packet analog_packet = {
-// 		.type = SR_DF_ANALOG,
-// 		.payload = &analog
-// 	};
-
-// 	sr_session_send(sdi, &analog_packet);
-// }
 
 static void la_send_data_proc(struct sr_dev_inst *sdi,
 	uint8_t *data, size_t length, size_t sample_width)
@@ -730,51 +693,12 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 	// }
 
 
-// #define PREAMBLE 0xABCD
-
-//size_t offset = 0;
-
-// while (offset + HEADER_SIZE + 2 <= transfer->actual_length) {
-//     // Scan for the preamble at the current offset
-//     uint16_t candidate = read_uint16_be(&transfer->buffer[offset]);
-//     if (candidate != PREAMBLE) {
-//         offset++;  // Skip byte-by-byte until we hit 0xABCD
-//         continue;
-//     }
-
-//     struct parsed_packet pkt;
-//     int parsed_len = fx3driver_parse_next_packet(&transfer->buffer[offset],
-//                                                  transfer->actual_length - offset,
-//                                                  &pkt);
-
-//     if (parsed_len == 0) {
-//         sr_dbg("Packet incomplete at offset %zu, waiting for more data", offset);
-//         break;
-//     }
-
-//     if (parsed_len == 2) {
-//         sr_dbg("Corrupt packet starting at offset %zu (bad format or checksum)", offset);
-//         offset++;  // Try to find next preamble again
-//         continue;
-//     }
-
-//     sr_dbg("Parsed valid packet at offset %zu", offset);
-
-//     // Do something with pkt here...
-
-//     if (pkt.samples)
-//         g_free(pkt.samples);
-//     if (pkt.digital_samples)
-//         g_free(pkt.digital_samples);
-
-//     offset += parsed_len;
-// }
-
 
 
 
 	/* Save incoming transfer before reusing the transfer struct. */
-	unitsize = devc->sample_wide ? 2 : 1;
+	//unitsize = devc->sample_wide ? 2 : 1;
+	unitsize = 2;
 	cur_sample_count = transfer->actual_length / unitsize;
 	processed_samples = 0;
 
@@ -876,49 +800,6 @@ check_trigger:
 		resubmit_transfer(transfer);
 }
 
-
-
-
-
-// Parser function **************************************************************************
-
-// static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
-// {
-// 	struct sr_dev_inst *sdi = transfer->user_data;
-// 	struct dev_context *devc = sdi->priv;
-
-// 	if (transfer->status != LIBUSB_TRANSFER_COMPLETED) {
-// 		// handle error (log, retry, etc.)
-// 		return;
-// 	}
-
-// 	uint8_t *ptr = transfer->buffer;
-// 	size_t remaining = transfer->actual_length;
-
-// 	while (remaining >= HEADER_SIZE + SAMPLE_SIZE) {
-// 		// ---- Example parsing, adjust to match your packet format ----
-// 		// For example: [2 bytes: payload_length] + [2 bytes: flags or timestamp]
-// 		uint16_t payload_length = ptr[0] | (ptr[1] << 8);  // Little-endian
-
-// 		if (payload_length % SAMPLE_SIZE != 0 || payload_length + HEADER_SIZE > remaining) {
-// 			// invalid or incomplete packet, break or skip
-// 			break;
-// 		}
-
-// 		uint8_t *sample_data = ptr + HEADER_SIZE;
-
-// 		// Dispatch just the sample portion to the mso_send_data_proc
-// 		mso_send_data_proc(sdi, sample_data, payload_length, SAMPLE_SIZE);
-
-// 		ptr += HEADER_SIZE + payload_length;
-// 		remaining -= HEADER_SIZE + payload_length;
-// 	}
-
-// 	// Resubmit transfer to keep receiving more data
-// 	libusb_submit_transfer(transfer);
-// }
-
-// **************************************************************************
 
 
 
