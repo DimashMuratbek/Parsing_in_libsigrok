@@ -55,6 +55,8 @@ static inline uint16_t read_uint16_be(const uint8_t *buf) {
 }
 
 
+static struct parsed_packet parsed_pkt;
+
 
 static uint16_t calculate_checksum(const uint8_t *data, size_t length) {
     uint16_t sum = 0;
@@ -159,7 +161,7 @@ int fx3driver_parse_next_packet(const uint8_t *data, size_t len, struct parsed_p
 		return 2;
 	}
 
-    size_t sample_data_len = packet_length - 18;  // subtract header + checksum
+    size_t sample_data_len = packet_length - 16;  // subtract header + checksum   use 18 if checksum enabled and if not use 16
     size_t num_samples = sample_data_len / 2;
     if (num_samples == 0 || num_samples > 11) {
         
@@ -184,7 +186,7 @@ int fx3driver_parse_next_packet(const uint8_t *data, size_t len, struct parsed_p
 
 	// To assign samples to corresponding chnanle number 
 	for (size_t i = 0; i < num_samples; i++) {
-    uint16_t raw = read_uint16_be(&pkt_data[14 + i * 2]);
+    uint16_t raw = read_uint16_be(&pkt_data[16 + i * 2]);
     uint8_t bit = (raw & 0x01) ? 1 : 0;
     pkt->digital_samples[i] = bit << pkt->channel_number;
 	//pkt->digital_samples[i] = 0xFF;
@@ -192,7 +194,6 @@ int fx3driver_parse_next_packet(const uint8_t *data, size_t len, struct parsed_p
 
     sr_err("Sample[%zu] raw=0x%04X, shifted=0x%02X", i, raw, pkt->digital_samples[i]);
     }
-
 
 
     // uint16_t checksum = calculate_checksum(pkt_data, packet_length - 2);
@@ -545,6 +546,7 @@ static void mso_send_data_proc(struct sr_dev_inst *sdi,
 {
 	struct dev_context *devc = sdi->priv;
 	struct parsed_packet pkt;
+	(void)sample_width;
 
 	size_t offset = 0;
 
@@ -560,6 +562,11 @@ static void mso_send_data_proc(struct sr_dev_inst *sdi,
 	sr_err("mso_send_data_proc started ");
 	while (offset + HEADER_SIZE <= length) {
 		int parsed_len = fx3driver_parse_next_packet(&data[offset], length - offset, &pkt);
+
+		if(parsed_len == -3){
+			sr_err("Skipping to next packet %zu.", offset);
+			continue;;
+		}
 		if (parsed_len <= 0) {
 			sr_err("Invalid or incomplete packet at offset %zu.", offset);
 			break;
@@ -614,7 +621,16 @@ static void mso_send_data_proc(struct sr_dev_inst *sdi,
 
 		
 
-		memcpy(devc->logic_buffer, pkt.digital_samples, pkt.num_samples * sizeof(uint16_t));
+		memcpy(devc->logic_buffer, pkt.digital_samples, pkt.num_samples);
+
+		printf("num_samples = %u\n", pkt.num_samples);
+
+		for (unsigned i = 0; i < pkt.num_samples; i++) {
+			const uint8_t *sample_ptr = (const uint8_t *)devc->logic_buffer + i * 2;
+			uint16_t sample = (sample_ptr[0]) | (sample_ptr[1] << 8);
+			printf("SAMPLE[%u] = 0x%04X\n", i, sample);
+		}
+
 
 			const struct sr_datafeed_logic logic = {
 				.length = pkt.num_samples,
@@ -629,9 +645,9 @@ static void mso_send_data_proc(struct sr_dev_inst *sdi,
 
 		sr_session_send(sdi, &logic_packet);
 
-		// Free parsed memory
-		g_free(pkt.samples);
-		g_free(pkt.digital_samples);
+		// // Free parsed memory
+		// g_free(pkt.samples);
+		// g_free(pkt.digital_samples);
 
 		offset += parsed_len;
 
