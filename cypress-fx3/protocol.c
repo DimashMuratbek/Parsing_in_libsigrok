@@ -22,7 +22,8 @@
 #include <glib/gstdio.h>
 #include "protocol.h"
 
-
+#include <stdint.h>
+#include <stdio.h>
 
 
 #pragma pack(push, 1)
@@ -70,13 +71,13 @@ int fx3driver_parse_next_packet(const uint8_t *data, size_t len, struct parsed_p
 {
 
 	// Display raw data
-    // for (int i=0;i<len;i++) {
-	// 	printf("%02X ", data[i]);
-	// 	if (i % 30 == 0) {
-	// 		printf("\n");
+    for (int i=0;i<len;i++) {
+		printf("%02X ", data[i]);
+		if (i % 30 == 0) {
+			printf("\n");
 		
-	// 	}
-	// }
+		}
+	}
 
 	// return 0;
 	sr_err("Entered fx3driver_parse_next_packet (len=%zu)", len);
@@ -124,8 +125,6 @@ int fx3driver_parse_next_packet(const uint8_t *data, size_t len, struct parsed_p
 		}
 		offset++;
 	}
-
-
 
 
 
@@ -178,22 +177,38 @@ int fx3driver_parse_next_packet(const uint8_t *data, size_t len, struct parsed_p
         return 2;
     }
 
+
+	//Get the bits from hex values 
+	for (size_t i = 0; i < num_samples; i++) {
+    uint16_t raw = read_uint16_be(&pkt_data[14 + i * 2]);
+
+    // Optionally print per bit
+    for (int ch = 0; ch < 8; ch++) {
+        uint8_t bit = (raw >> ch) & 1;
+        sr_err("Sample[%zu] D%d: %s", i, ch, bit ? "HIGH" : "LOW");
+    }
+
+    // Save lower 8 bits as channel states
+    pkt->digital_samples[i] = raw & 0xFF;
+	}
+
+
     // for (size_t i = 0; i < num_samples; i++) {
     //     uint16_t raw = read_uint16_be(&pkt_data[14 + i * 2]);
     //     pkt->digital_samples[i] = raw & 0x01;
     //     sr_err("Sample[%zu] raw=0x%04X, bit=%u", i, raw, pkt->digital_samples[i]);
     // }
 
-	// To assign samples to corresponding chnanle number 
-	for (size_t i = 0; i < num_samples; i++) {
-    uint16_t raw = read_uint16_be(&pkt_data[16 + i * 2]);
-    uint8_t bit = (raw & 0x01) ? 1 : 0;
-    pkt->digital_samples[i] = bit << pkt->channel_number;
-	//pkt->digital_samples[i] = 0xFF;
-	//pkt->digital_samples[i] = raw & 0xFF;
+	// // To assign samples to corresponding chnanle number 
+	// for (size_t i = 0; i < num_samples; i++) {
+    // uint16_t raw = read_uint16_be(&pkt_data[16 + i * 2]);
+    // uint8_t bit = (raw & 0x01) ? 1 : 0;
+    // pkt->digital_samples[i] = bit << pkt->channel_number;
+	// //pkt->digital_samples[i] = 0xFF;
+	// //pkt->digital_samples[i] = raw & 0xFF;
 
-    sr_err("Sample[%zu] raw=0x%04X, shifted=0x%02X", i, raw, pkt->digital_samples[i]);
-    }
+    // sr_err("Sample[%zu] raw=0x%04X, shifted=0x%02X", i, raw, pkt->digital_samples[i]);
+    // }
 
 
     // uint16_t checksum = calculate_checksum(pkt_data, packet_length - 2);
@@ -563,10 +578,10 @@ static void mso_send_data_proc(struct sr_dev_inst *sdi,
 	while (offset + HEADER_SIZE <= length) {
 		int parsed_len = fx3driver_parse_next_packet(&data[offset], length - offset, &pkt);
 
-		if(parsed_len == -3){
-			sr_err("Skipping to next packet %zu.", offset);
-			continue;;
-		}
+		// if(parsed_len == -3){
+		// 	sr_err("Skipping to next packet %zu.", offset);
+		// 	continue;;
+		// }
 		if (parsed_len <= 0) {
 			sr_err("Invalid or incomplete packet at offset %zu.", offset);
 			break;
