@@ -71,13 +71,13 @@ int fx3driver_parse_next_packet(const uint8_t *data, size_t len, struct parsed_p
 {
 
 	// Display raw data
-    for (int i=0;i<len;i++) {
-		printf("%02X ", data[i]);
-		if (i % 30 == 0) {
-			printf("\n");
+    // for (int i=0;i<len;i++) {
+	// 	printf("%02X ", data[i]);
+	// 	if (i % 30 == 0) {
+	// 		printf("\n");
 		
-		}
-	}
+	// 	}
+	// }
 
 	// return 0;
 	sr_err("Entered fx3driver_parse_next_packet (len=%zu)", len);
@@ -95,11 +95,11 @@ int fx3driver_parse_next_packet(const uint8_t *data, size_t len, struct parsed_p
 	size_t offset = 0;
 	while (offset + 20 <= len) {
 		if (read_uint16_be(&data[offset]) == 0xABCD) {
-			sr_err("Dumping 16 words after preamble at offset %zu", offset);
-			for (size_t i = 0; i < 16; i++) {
-				uint16_t word = read_uint16_be(&data[offset + 2 + i*2]);
-				sr_err("Word[%zu] = 0x%04X", i, word);
-			}
+			// sr_err("Dumping 16 words after preamble at offset %zu", offset);
+			// for (size_t i = 0; i < 16; i++) {
+			// 	uint16_t word = read_uint16_be(&data[offset + 2 + i*2]);
+			// 	sr_err("Word[%zu] = 0x%04X", i, word);
+			// }
 
 			uint16_t ch_field = read_uint16_be(&data[offset + 2]);
 			uint8_t ch_type = ch_field >> 8;
@@ -160,7 +160,13 @@ int fx3driver_parse_next_packet(const uint8_t *data, size_t len, struct parsed_p
 		return 2;
 	}
 
-    size_t sample_data_len = packet_length - 16;  // subtract header + checksum   use 18 if checksum enabled and if not use 16
+	sr_err("Packet length: 0x%04X", packet_length);
+
+    size_t sample_data_len = packet_length - 18;  // subtract header + checksum   use 18 if checksum enabled and if not use 16
+
+	
+	sr_err("Sample data length: 0x%zx", sample_data_len);
+
     size_t num_samples = sample_data_len / 2;
     if (num_samples == 0 || num_samples > 11) {
         
@@ -183,13 +189,13 @@ int fx3driver_parse_next_packet(const uint8_t *data, size_t len, struct parsed_p
     uint16_t raw = read_uint16_be(&pkt_data[14 + i * 2]);
 
     // Optionally print per bit
-    for (int ch = 0; ch < 8; ch++) {
-        uint8_t bit = (raw >> ch) & 1;
+    for (int ch = 0; ch <= pkt->channel_number; ch++) {
+        uint16_t bit = (raw >> ch) & 1;
         sr_err("Sample[%zu] D%d: %s", i, ch, bit ? "HIGH" : "LOW");
     }
 
-    // Save lower 8 bits as channel states
-    pkt->digital_samples[i] = raw & 0xFF;
+    // Save 16 bits as channel states
+    pkt->digital_samples[i] =  raw;   // 0xFF for 8 bits
 	}
 
 
@@ -620,37 +626,25 @@ static void mso_send_data_proc(struct sr_dev_inst *sdi,
 		}
 		else if (pkt.channel_type == 0xFF) {
 			// Digital
-			if (pkt.num_samples > devc->logic_buffer_size) {
-				devc->logic_buffer = g_realloc(devc->logic_buffer, pkt.num_samples);
+			
+				devc->logic_buffer = g_realloc(devc->logic_buffer, pkt.num_samples * sizeof(uint16_t));
 				devc->logic_buffer_size = pkt.num_samples;
 				sr_err("Gettting Digital num_samples = %d", pkt.num_samples);
-			}
+			
 
-			for (size_t i = 0; i < pkt.num_samples; i++) {
-    		sr_err("Digital sample[%zu] = 0x%02X", i, pkt.digital_samples[i]);
-			}
+			// for (size_t i = 0; i < pkt.num_samples; i++) {
+    		// sr_err("Digital sample[%zu] = 0x%04X", i, pkt.digital_samples[i]);
+			// }
 
-		} else {
-			sr_err("Unknown channel type: 0x%02X", pkt.channel_type);
-		}
+			
 
-		
-
-		memcpy(devc->logic_buffer, pkt.digital_samples, pkt.num_samples);
-
-		printf("num_samples = %u\n", pkt.num_samples);
-
-		for (unsigned i = 0; i < pkt.num_samples; i++) {
-			const uint8_t *sample_ptr = (const uint8_t *)devc->logic_buffer + i * 2;
-			uint16_t sample = (sample_ptr[0]) | (sample_ptr[1] << 8);
-			printf("SAMPLE[%u] = 0x%04X\n", i, sample);
-		}
-
-
+			memcpy(devc->logic_buffer, pkt.digital_samples, pkt.num_samples * sizeof(uint16_t));
+	
 			const struct sr_datafeed_logic logic = {
 				.length = pkt.num_samples,
 				.unitsize = 2,
 				.data = devc->logic_buffer
+				
 			};
 
 			const struct sr_datafeed_packet logic_packet = {
@@ -658,18 +652,26 @@ static void mso_send_data_proc(struct sr_dev_inst *sdi,
 				.payload = &logic
 			};
 
-		sr_session_send(sdi, &logic_packet);
+			sr_session_send(sdi, &logic_packet);
+
+				 
+
+		} else {
+			sr_err("Unknown channel type: 0x%02X", pkt.channel_type);
+		}
+
+		// for (size_t i = 0; i < pkt.num_samples; i++) {
+    	// 	printf("[FINAL] Sample[%zu] = 0x%04X\n", i, ((uint16_t *)devc->logic_buffer)[i]);
+		// }
 
 		// // Free parsed memory
 		// g_free(pkt.samples);
 		// g_free(pkt.digital_samples);
 
 		offset += parsed_len;
-
-
-
 		
 	}
+
 }
 
 
@@ -678,6 +680,7 @@ static void mso_send_data_proc(struct sr_dev_inst *sdi,
 static void la_send_data_proc(struct sr_dev_inst *sdi,
 	uint8_t *data, size_t length, size_t sample_width)
 {
+
 	const struct sr_datafeed_logic logic = {
 		.length = length,
 		.unitsize = sample_width,
