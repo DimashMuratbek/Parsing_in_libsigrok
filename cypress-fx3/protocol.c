@@ -537,10 +537,6 @@ static void mso_send_data_proc(struct sr_dev_inst *sdi,
 	// if it sees channel_type 0xFF send samples to digital channels
 	if (pkt.channel_type == 0xFF) {
 
-		if (pkt.num_samples == 0 || pkt.num_samples > 4 || pkt.digital_samples == NULL) {
-			sr_err("Invalid packet: num_samples=%zu digital_samples=%p", pkt.num_samples, pkt.digital_samples);
-			break;
-		}
 
 		int sample_width = 2; // Assuming 16-bit samples
 		size_t needed_bytes = pkt.num_samples * sample_width; // we are retriveing 4 samples, each sample is 2 bytes, so the toaotl length will be 4*2 = 8 bytes 
