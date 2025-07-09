@@ -71,13 +71,13 @@ int fx3driver_parse_next_packet(const uint8_t *data, size_t len, struct parsed_p
 {
 
 	// Display raw data
-    for (int i=0;i<len;i++) {
-		printf("%02X ", data[i]);
-		if (i % 30 == 0) {
-			printf("\n");
+    // for (int i=0;i<len;i++) {
+	// 	printf("%02X ", data[i]);
+	// 	if (i % 30 == 0) {
+	// 		printf("\n");
 		
-		}
-	}
+	// 	}
+	// }
 
 	// return 0;
 	sr_err("Entered fx3driver_parse_next_packet (len=%zu)", len);
@@ -97,7 +97,7 @@ int fx3driver_parse_next_packet(const uint8_t *data, size_t len, struct parsed_p
 		if (read_uint16_be(&data[offset]) == 0xABCD) {
 			sr_err("Dumping 16 words after preamble at offset %zu", offset);
 			for (size_t i = 0; i < 16; i++) {
-				uint16_t word = read_uint16_be(&data[offset + 2 + i*2]);
+				uint16_t word = read_uint16_be(&data[offset + 2 + i * 2]);
 				sr_err("Word[%zu] = 0x%04X", i, word);
 			}
 
@@ -161,8 +161,9 @@ int fx3driver_parse_next_packet(const uint8_t *data, size_t len, struct parsed_p
 	}
 
     size_t sample_data_len = packet_length - 18;  // subtract header + checksum   use 18 if checksum enabled in packet and if not use 16
-    size_t num_samples = sample_data_len / 2;; 
-    if (num_samples == 0 || num_samples > 11) {
+    //size_t num_samples = sample_data_len / 2; for digital
+	size_t num_samples = sample_data_len ;
+    if (num_samples == 0 || num_samples > 16) {
         
 		sr_err("Invalid sample count: 0x%zx", num_samples);
 
@@ -170,31 +171,55 @@ int fx3driver_parse_next_packet(const uint8_t *data, size_t len, struct parsed_p
     }
 
     pkt->num_samples = num_samples;
-    pkt->samples = NULL;
-    pkt->digital_samples = g_malloc0(num_samples);
-    if (!pkt->digital_samples) {
+    
+	pkt->analog_samples = g_malloc0(num_samples * sizeof(float));
+    //pkt->digital_samples = g_malloc0(num_samples);
+    if (!pkt->analog_samples) {
         sr_err("Memory allocation failed");
         return 2;
     }
 
+
+
+	// Get the analog samples and print their values in Volts
 	
-	//Get the bits from hex values for channels
+
 	for (size_t i = 0; i < num_samples; i++) {
-    uint16_t raw = read_uint16_be(&pkt_data[14 + i * 2]); // start getting samples
+		uint8_t raw = pkt_data[14 + i];
 
-    // Optionally print each bit of the samples 
-    for (int ch = 0; ch < 16; ch++) {
-        uint8_t bit = (raw >> ch) & 1;
-        sr_err("Sample[%zu] D%d: %s", i, ch, bit ? "HIGH" : "LOW");
-    }
+		// Convert to voltage
+		float voltage = (raw / 255.0f) * 3.3f;
 
-    // Save lower 8 bits as channel states
-    pkt->digital_samples[i] = raw;
+		// Store as float in volts
+		pkt->analog_samples[i] = voltage;
+
+		// Print the analog voltage
+		sr_err("Sample[%zu]: Analog voltage = %.3f V", i, voltage);
 	}
 
 
 
-    sr_err("Digital packet parsed successfully");
+
+	// //Get the bits from hex values for channels
+	// for (size_t i = 0; i < num_samples; i++) {
+    // //uint8_t raw = read_uint16_be(&pkt_data[14 + i * 2]); // start getting samples
+
+    // // Optionally print each bit of the samples 
+    // for (int ch = 0; ch < 8; ch++) {
+    //     int8_t raw = pkt_data[14 + i];
+	// 	float voltage = (raw / 255.0f) * 3.3f;
+   	// 	pkt->analog_samples[i] = voltage;
+    //     sr_err("Sample[%zu]: Analog value = %u", i, voltage);
+    // }
+
+    // // Save lower 8 bits as channel states
+	// pkt->analog_samples[i] = voltage;  // Store as float for analog samples
+    // //pkt->digital_samples[i] = raw;
+	// }
+
+
+
+    sr_err("Analog packet parsed successfully");
     return offset + packet_length;
 }
 
@@ -511,8 +536,142 @@ static void resubmit_transfer(struct libusb_transfer *transfer)
 
 }
 
+// retrieve and put actual samples from incoming packets
+// static void mso_send_data_proc(struct sr_dev_inst *sdi,
+// 	uint8_t *data, size_t length, size_t sample_width)
+// {
+	 
+// 	struct sr_datafeed_analog analog;
+// 	struct sr_analog_encoding encoding;
+// 	struct sr_analog_meaning meaning;
+// 	struct sr_analog_spec spec;
+// 	struct dev_context *devc = sdi->priv;
+// 	struct parsed_packet pkt;
+// 	(void)sample_width;
 
+// 	size_t offset = 0;
+
+// 	sr_err("mso_send_data_proc started ");
+
+// 	while (offset + HEADER_SIZE <= length) {
+// 		int parsed_len = fx3driver_parse_next_packet(&data[offset], length - offset, &pkt);
+
+// 		// if(parsed_len == -3){
+// 		// 	sr_err("Skipping to next packet %zu.", offset);
+// 		// 	continue;;
+// 		// }
+// 		if (parsed_len <= 0) {
+// 			sr_err("Invalid or incomplete packet at offset %zu.", offset);
+// 			break;
+// 		}
+
+// 		// if it sees channel_type 0xFF send samples to digital channels
+// 		if (pkt.channel_type == 0x00) {
+
+// 			int sample_width = 1; // Assuming 16-bit samples
+// 			//size_t needed_bytes = pkt.num_samples * sample_width; // we are retriveing 8 samples, each sample is 1 bytes, so the toaotl length will be 8*1 = 8 bytes 
+// 			size_t needed_bytes = pkt.num_samples * sizeof(float);
+// 			if (needed_bytes > devc->analog_buffer_size) {
+// 				devc->analog_buffer = g_realloc(devc->analog_buffer, needed_bytes);
+// 				devc->analog_buffer_size = needed_bytes;
+// 			}
+
+// 			memcpy(devc->analog_buffer, pkt.analog_samples,needed_bytes);
+
+// 			sr_analog_init(&analog, &encoding, &meaning, &spec, 1);
+// 			analog.meaning->channels = devc->enabled_analog_channels;
+// 			analog.meaning->mq = SR_MQ_VOLTAGE;
+// 			analog.meaning->unit = SR_UNIT_VOLT;
+// 			analog.meaning->mqflags = 0 /* SR_MQFLAG_DC */;
+// 			analog.num_samples = pkt.num_samples;
+// 			analog.data = devc->analog_buffer;
+			
+
+// 			const struct sr_datafeed_packet analog_packet = {
+// 				.type = SR_DF_ANALOG,
+// 				.payload = &analog
+// 			};
+
+// 			sr_session_send(sdi, &analog_packet);
+
+// 			for (size_t i = 0; i < pkt.num_samples; i++) {
+//    				printf("[FINAL] Sample[%zu] = %.3f V\n", i, ((float*)devc->analog_buffer)[i]);   
+// 			}
+// 		}
+
+// 		offset += parsed_len;
+// 	}
+// }
+
+
+// Testing function to send hardcoded data
 static void mso_send_data_proc(struct sr_dev_inst *sdi,
+    uint8_t *data, size_t length, size_t sample_width)
+{
+    struct sr_datafeed_analog analog;
+    struct sr_analog_encoding encoding;
+    struct sr_analog_meaning meaning;
+    struct sr_analog_spec spec;
+    struct dev_context *devc = sdi->priv;
+    (void)sample_width;
+
+    sr_err("mso_send_data_proc started with fixed 8-channel test data");
+
+    size_t num_channels = 8;
+    size_t num_samples = 100;  
+
+    size_t total_floats = num_channels * num_samples;
+    size_t needed_bytes = total_floats * sizeof(float);
+
+    if (needed_bytes > devc->analog_buffer_size) {
+        devc->analog_buffer = g_realloc(devc->analog_buffer, needed_bytes);
+        devc->analog_buffer_size = needed_bytes;
+    }
+
+    float *buf = (float *)devc->analog_buffer;
+
+    // Fixed values per channel
+    float channel_values[8] = {
+        0.5f,
+        1.0f,
+        1.5f,
+        2.0f,
+        2.5f,
+        3.0f,
+        0.75f,
+        2.25f
+    };
+
+    // Fill interleaved buffer: each sample in time has the 8 channel values
+    for (size_t sample = 0; sample < num_samples; sample++) {
+        for (size_t ch = 0; ch < num_channels; ch++) {
+            buf[sample * num_channels + ch] = channel_values[ch];
+        }
+    }
+
+    sr_analog_init(&analog, &encoding, &meaning, &spec, num_channels);
+    analog.meaning->channels = devc->enabled_analog_channels;
+    analog.meaning->mq = SR_MQ_VOLTAGE;
+    analog.meaning->unit = SR_UNIT_VOLT;
+    analog.meaning->mqflags = 0;
+    analog.num_samples = num_samples;  // samples per channel
+    analog.data = devc->analog_buffer;
+
+    const struct sr_datafeed_packet analog_packet = {
+        .type = SR_DF_ANALOG,
+        .payload = &analog
+    };
+
+    sr_session_send(sdi, &analog_packet);
+
+    // Print debug
+    for (size_t i = 0; i < total_floats; i++) {
+        printf("[FINAL] Sample[%zu] = %.3f V\n", i, buf[i]);
+    }
+}
+
+
+static void la_send_data_proc(struct sr_dev_inst *sdi,
 	uint8_t *data, size_t length, size_t sample_width)
 {
 	struct dev_context *devc = sdi->priv;
@@ -521,7 +680,7 @@ static void mso_send_data_proc(struct sr_dev_inst *sdi,
 
 	size_t offset = 0;
 
-	sr_err("mso_send_data_proc started ");
+	sr_err("la_send_data_proc started ");
 	while (offset + HEADER_SIZE <= length) {
 		int parsed_len = fx3driver_parse_next_packet(&data[offset], length - offset, &pkt);
 
@@ -536,7 +695,6 @@ static void mso_send_data_proc(struct sr_dev_inst *sdi,
 
 	// if it sees channel_type 0xFF send samples to digital channels
 	if (pkt.channel_type == 0xFF) {
-
 
 		int sample_width = 2; // Assuming 16-bit samples
 		size_t needed_bytes = pkt.num_samples * sample_width; // we are retriveing 4 samples, each sample is 2 bytes, so the toaotl length will be 4*2 = 8 bytes 
@@ -571,26 +729,6 @@ static void mso_send_data_proc(struct sr_dev_inst *sdi,
 		offset += parsed_len;
 	
 	}
-
-}
-
-
-
-static void la_send_data_proc(struct sr_dev_inst *sdi,
-	uint8_t *data, size_t length, size_t sample_width)
-{
-	const struct sr_datafeed_logic logic = {
-		.length = length,
-		.unitsize = sample_width,
-		.data = data
-	};
-
-	const struct sr_datafeed_packet packet = {
-		.type = SR_DF_LOGIC,
-		.payload = &logic
-	};
-
-	sr_session_send(sdi, &packet);
 }
 
 static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
@@ -622,7 +760,7 @@ static void LIBUSB_CALL receive_transfer(struct libusb_transfer *transfer)
 
 	/* Save incoming transfer before reusing the transfer struct. */
 	//unitsize = devc->sample_wide ? 2 : 1;
-	unitsize = 2; // 16-bit samples
+	unitsize = 1; // 16-bit samples
 	cur_sample_count = transfer->actual_length / unitsize;
 	processed_samples = 0;
 
@@ -891,11 +1029,13 @@ static int start_transfers(const struct sr_dev_inst *sdi)
 	 * enabled, use mso_send_data_proc() to properly handle the analog
 	 * data. Otherwise use la_send_data_proc().
 	 */
-	if (g_slist_length(devc->enabled_analog_channels) > 0)
+	if (g_slist_length(devc->enabled_analog_channels) > 0){
+		sr_err("Using mso_send_data_proc for analog channels.");
 		devc->send_data_proc = mso_send_data_proc;
-	else
-		devc->send_data_proc = mso_send_data_proc;
-
+	}else{
+		sr_err("Using la_send_data_proc for logic channels.");	
+		devc->send_data_proc = la_send_data_proc;
+	}
 	std_session_send_df_header(sdi);
 
 	return SR_OK;
@@ -934,9 +1074,8 @@ SR_PRIV int cypress_fx3_start_acquisition(const struct sr_dev_inst *sdi)
 	/* Prepare for analog sampling. */
 	if (g_slist_length(devc->enabled_analog_channels) > 0) {
 		/* We need a buffer half the size of a transfer. */
-		devc->logic_buffer = g_try_malloc(size / 2);
-		devc->analog_buffer = g_try_malloc(
-			sizeof(float) * size / 2);
+		devc->logic_buffer = g_try_malloc(size);
+		devc->analog_buffer = g_try_malloc(sizeof(float) * size );
 	}
 	start_transfers(sdi);
 	if ((ret = command_start_acquisition(sdi)) != SR_OK) {
