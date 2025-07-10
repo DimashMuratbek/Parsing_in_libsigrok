@@ -20,6 +20,8 @@
 #ifndef LIBSIGROK_HARDWARE_CYPRESS_FX3_PROTOCOL_H
 #define LIBSIGROK_HARDWARE_CYPRESS_FX3_PROTOCOL_H
 
+#include <stdbool.h>
+
 #include <glib.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -35,10 +37,10 @@
 #define NUM_TRIGGER_STAGES	4
 
 #define MAX_RENUM_DELAY_MS	3000
-#define NUM_SIMUL_TRANSFERS	32
+#define NUM_SIMUL_TRANSFERS	16
 #define MAX_EMPTY_TRANSFERS	(NUM_SIMUL_TRANSFERS * 2)
 
-#define NUM_CHANNELS		16
+#define NUM_CHANNELS		8  // was 16 channels
 
 #define FX3_REQUIRED_VERSION_MAJOR	1
 
@@ -123,19 +125,27 @@ struct dev_context {
 	struct sr_context *ctx;
 	void (*send_data_proc)(struct sr_dev_inst *sdi,
 		uint8_t *data, size_t length, size_t sample_width);
-	uint8_t *logic_buffer;
+	
+
 	float *analog_buffer;
+	size_t analog_buffer_size;
+
+	uint8_t *logic_buffer;  
+	size_t logic_buffer_size;
 };
 
 
 
 struct parsed_packet {
     uint8_t channel_type;
-    uint8_t channel_number;
+    uint8_t channel_number;  //  uint8_t
     uint32_t timestamp;
     unsigned int num_samples;
-    float *samples;           // analog
-    uint8_t *digital_samples; // digital
+    float *analog_samples;           // analog
+    uint16_t *digital_samples; // digital  //  uint8_t
+
+	uint16_t ts_lo;   // <-- add this
+    uint16_t ts_hi;   // <-- and this
 };
 
 int fx3driver_parse_next_packet(const uint8_t *data, size_t len, struct parsed_packet *pkt);

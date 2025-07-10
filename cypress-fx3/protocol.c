@@ -170,52 +170,69 @@ int fx3driver_parse_next_packet(const uint8_t *data, size_t len, struct parsed_p
         return 2;
     }
 
-    pkt->num_samples = num_samples;
-    
+    pkt->num_samples = 2;
 	pkt->analog_samples = g_malloc0(num_samples * sizeof(float));
+
     //pkt->digital_samples = g_malloc0(num_samples);
-    if (!pkt->analog_samples) {
+    
+	if (!pkt->analog_samples) {
         sr_err("Memory allocation failed");
         return 2;
     }
 
 
-
 	// Get the analog samples and print their values in Volts
-	
+	// for (size_t i = 0; i < num_samples; i++) {
+	// 	uint8_t raw = pkt_data[14 + i];
 
-	for (size_t i = 0; i < num_samples; i++) {
-		uint8_t raw = pkt_data[14 + i];
+	// 	// Convert to voltage
+	// 	float voltage = (raw / 255.0f) * 3.3f;
 
-		// Convert to voltage
-		float voltage = (raw / 255.0f) * 3.3f;
+	// 	// Store as float in volts
+	// 	pkt->analog_samples[i] = voltage;
 
-		// Store as float in volts
-		pkt->analog_samples[i] = voltage;
-
-		// Print the analog voltage
-		sr_err("Sample[%zu]: Analog voltage = %.3f V", i, voltage);
-	}
-
-
+	// 	// Print the analog voltage
+	// 	sr_err("Sample[%zu]: Analog voltage = %.3f V", i, voltage);
+	// }
 
 
 	// //Get the bits from hex values for channels
 	// for (size_t i = 0; i < num_samples; i++) {
     // //uint8_t raw = read_uint16_be(&pkt_data[14 + i * 2]); // start getting samples
+	// int8_t raw = pkt_data[14 + i];
+	// float voltage = (raw / 255.0f) * 3.3f;
 
     // // Optionally print each bit of the samples 
-    // for (int ch = 0; ch < 8; ch++) {
-    //     int8_t raw = pkt_data[14 + i];
-	// 	float voltage = (raw / 255.0f) * 3.3f;
-   	// 	pkt->analog_samples[i] = voltage;
-    //     sr_err("Sample[%zu]: Analog value = %u", i, voltage);
-    // }
-
-    // // Save lower 8 bits as channel states
-	// pkt->analog_samples[i] = voltage;  // Store as float for analog samples
-    // //pkt->digital_samples[i] = raw;
+    // 	for (int ch = 0; ch < 8; ch++) {
+	// 		uint8_t bit = (raw >> ch) & 1;
+   	// 	}
+	
+   	// pkt->analog_samples[i] = voltage;
+    // sr_err("Sample[%zu]: Analog voltage = %.3f V", i, voltage);
+    
 	// }
+
+
+	size_t sample_data_offset = 14;
+	size_t num_samples_per_channel = 2;
+	size_t num_channels = 8;
+	//pkt->num_analog_channels = num_channels;
+
+
+	for (size_t ch = 0; ch < num_channels; ch++) {
+		for (size_t s = 0; s < num_samples_per_channel; s++) {
+			size_t index = sample_data_offset + (ch * num_samples_per_channel) + s;
+
+			uint8_t raw = pkt_data[index];
+			float voltage = (raw / 255.0f) * 3.3f;
+
+			// Store in a linear array, e.g.:
+			pkt->analog_samples[s * num_channels + ch] = voltage;
+
+			sr_err("Sample[%zu] Channel[%zu]: %.3f V", s, ch, voltage);
+		}
+	}
+
 
 
 
@@ -537,138 +554,158 @@ static void resubmit_transfer(struct libusb_transfer *transfer)
 }
 
 // retrieve and put actual samples from incoming packets
-// static void mso_send_data_proc(struct sr_dev_inst *sdi,
-// 	uint8_t *data, size_t length, size_t sample_width)
-// {
+static void mso_send_data_proc(struct sr_dev_inst *sdi,
+	uint8_t *data, size_t length, size_t sample_width)
+{
 	 
-// 	struct sr_datafeed_analog analog;
-// 	struct sr_analog_encoding encoding;
-// 	struct sr_analog_meaning meaning;
-// 	struct sr_analog_spec spec;
-// 	struct dev_context *devc = sdi->priv;
-// 	struct parsed_packet pkt;
-// 	(void)sample_width;
+	struct sr_datafeed_analog analog;
+	struct sr_analog_encoding encoding;
+	struct sr_analog_meaning meaning;
+	struct sr_analog_spec spec;
+	struct dev_context *devc = sdi->priv;
+	struct parsed_packet pkt;
+	(void)sample_width;
 
-// 	size_t offset = 0;
+	size_t offset = 0;
 
-// 	sr_err("mso_send_data_proc started ");
+	sr_err("mso_send_data_proc started ");
 
-// 	while (offset + HEADER_SIZE <= length) {
-// 		int parsed_len = fx3driver_parse_next_packet(&data[offset], length - offset, &pkt);
+	while (offset + HEADER_SIZE <= length) {
+		int parsed_len = fx3driver_parse_next_packet(&data[offset], length - offset, &pkt);
 
-// 		// if(parsed_len == -3){
-// 		// 	sr_err("Skipping to next packet %zu.", offset);
-// 		// 	continue;;
-// 		// }
-// 		if (parsed_len <= 0) {
-// 			sr_err("Invalid or incomplete packet at offset %zu.", offset);
-// 			break;
-// 		}
+		// if(parsed_len == -3){
+		// 	sr_err("Skipping to next packet %zu.", offset);
+		// 	continue;;
+		// }
+		if (parsed_len <= 0) {
+			sr_err("Invalid or incomplete packet at offset %zu.", offset);
+			break;
+		}
 
-// 		// if it sees channel_type 0xFF send samples to digital channels
-// 		if (pkt.channel_type == 0x00) {
+		// if it sees channel_type 0xFF send samples to digital channels
+		if (pkt.channel_type == 0x00) {
+			//size_t num_channels = devc->enabled_analog_channels;
+			size_t num_channels = 8;
+			int sample_width = 1; // Assuming 16-bit samples
+			//size_t needed_bytes = pkt.num_samples * sample_width; // we are retriveing 8 samples, each sample is 1 bytes, so the toaotl length will be 8*1 = 8 bytes 
+			size_t needed_bytes = pkt.num_samples * num_channels * sizeof(float);
+			if (needed_bytes > devc->analog_buffer_size) {
+				devc->analog_buffer = g_realloc(devc->analog_buffer, needed_bytes);
+				devc->analog_buffer_size = needed_bytes;
+			}
 
-// 			int sample_width = 1; // Assuming 16-bit samples
-// 			//size_t needed_bytes = pkt.num_samples * sample_width; // we are retriveing 8 samples, each sample is 1 bytes, so the toaotl length will be 8*1 = 8 bytes 
-// 			size_t needed_bytes = pkt.num_samples * sizeof(float);
-// 			if (needed_bytes > devc->analog_buffer_size) {
-// 				devc->analog_buffer = g_realloc(devc->analog_buffer, needed_bytes);
-// 				devc->analog_buffer_size = needed_bytes;
-// 			}
 
-// 			memcpy(devc->analog_buffer, pkt.analog_samples,needed_bytes);
+			memcpy(devc->analog_buffer, pkt.analog_samples,needed_bytes);
 
-// 			sr_analog_init(&analog, &encoding, &meaning, &spec, 1);
-// 			analog.meaning->channels = devc->enabled_analog_channels;
-// 			analog.meaning->mq = SR_MQ_VOLTAGE;
-// 			analog.meaning->unit = SR_UNIT_VOLT;
-// 			analog.meaning->mqflags = 0 /* SR_MQFLAG_DC */;
-// 			analog.num_samples = pkt.num_samples;
-// 			analog.data = devc->analog_buffer;
+			//memcpy(devc->analog_buffer, pkt.analog_samples,needed_bytes);
 			
 
-// 			const struct sr_datafeed_packet analog_packet = {
-// 				.type = SR_DF_ANALOG,
-// 				.payload = &analog
-// 			};
+			sr_analog_init(&analog, &encoding, &meaning, &spec, num_channels);
+			analog.meaning->channels = devc->enabled_analog_channels;
+			//analog.meaning->channels = num_channels;
+			analog.meaning->mq = SR_MQ_VOLTAGE;
+			analog.meaning->unit = SR_UNIT_VOLT;
+			analog.meaning->mqflags = 0 /* SR_MQFLAG_DC */;
+			analog.num_samples = pkt.num_samples;
+			analog.data = devc->analog_buffer;
+			encoding.is_float = true;
 
-// 			sr_session_send(sdi, &analog_packet);
+	
+			sr_err("Enabled analog channels: %zu.", (size_t)devc->enabled_analog_channels);
 
-// 			for (size_t i = 0; i < pkt.num_samples; i++) {
-//    				printf("[FINAL] Sample[%zu] = %.3f V\n", i, ((float*)devc->analog_buffer)[i]);   
-// 			}
-// 		}
 
-// 		offset += parsed_len;
-// 	}
-// }
+			const struct sr_datafeed_packet analog_packet = {
+				.type = SR_DF_ANALOG,
+				.payload = &analog
+			};
+
+
+			sr_err("num_samples=%u", analog.num_samples);
+			sr_err("num_channels=%u", num_channels);
+			sr_err("needed_bytes=%zu", needed_bytes);
+
+
+			sr_session_send(sdi, &analog_packet);
+
+			for (size_t s = 0; s < pkt.num_samples; s++) {
+				for (size_t ch = 0; ch < num_channels; ch++) {
+					float v = ((float*)devc->analog_buffer)[s * num_channels + ch];
+					printf("[FINAL] Sample[%zu] Channel[%zu] = %.3f V\n", s, ch, v);
+				}
+			}
+
+			
+		}
+		offset += parsed_len;
+	}
+}
 
 
 // Testing function to send hardcoded data
-static void mso_send_data_proc(struct sr_dev_inst *sdi,
-    uint8_t *data, size_t length, size_t sample_width)
-{
-    struct sr_datafeed_analog analog;
-    struct sr_analog_encoding encoding;
-    struct sr_analog_meaning meaning;
-    struct sr_analog_spec spec;
-    struct dev_context *devc = sdi->priv;
-    (void)sample_width;
+// static void mso_send_data_proc(struct sr_dev_inst *sdi,
+//     uint8_t *data, size_t length, size_t sample_width)
+// {
+//     struct sr_datafeed_analog analog;
+//     struct sr_analog_encoding encoding;
+//     struct sr_analog_meaning meaning;
+//     struct sr_analog_spec spec;
+//     struct dev_context *devc = sdi->priv;
+//     (void)sample_width;
 
-    sr_err("mso_send_data_proc started with fixed 8-channel test data");
+//     sr_err("mso_send_data_proc started with fixed 8-channel test data");
 
-    size_t num_channels = 8;
-    size_t num_samples = 100;  
+//     size_t num_channels = 8;
+//     size_t num_samples = 100;  
 
-    size_t total_floats = num_channels * num_samples;
-    size_t needed_bytes = total_floats * sizeof(float);
+//     size_t total_floats = num_channels * num_samples;
+//     size_t needed_bytes = total_floats * sizeof(float);
 
-    if (needed_bytes > devc->analog_buffer_size) {
-        devc->analog_buffer = g_realloc(devc->analog_buffer, needed_bytes);
-        devc->analog_buffer_size = needed_bytes;
-    }
+//     if (needed_bytes > devc->analog_buffer_size) {
+//         devc->analog_buffer = g_realloc(devc->analog_buffer, needed_bytes);
+//         devc->analog_buffer_size = needed_bytes;
+//     }
 
-    float *buf = (float *)devc->analog_buffer;
+//     float *buf = (float *)devc->analog_buffer;
 
-    // Fixed values per channel
-    float channel_values[8] = {
-        0.5f,
-        1.0f,
-        1.5f,
-        2.0f,
-        2.5f,
-        3.0f,
-        0.75f,
-        2.25f
-    };
+//     // Fixed values per channel
+//     float channel_values[8] = {
+//         0.5f,
+//         1.0f,
+//         1.5f,
+//         2.0f,
+//         2.5f,
+//         3.0f,
+//         0.75f,
+//         2.25f
+//     };
 
-    // Fill interleaved buffer: each sample in time has the 8 channel values
-    for (size_t sample = 0; sample < num_samples; sample++) {
-        for (size_t ch = 0; ch < num_channels; ch++) {
-            buf[sample * num_channels + ch] = channel_values[ch];
-        }
-    }
+//     // Fill interleaved buffer: each sample in time has the 8 channel values
+//     for (size_t sample = 0; sample < num_samples; sample++) {
+//         for (size_t ch = 0; ch < num_channels; ch++) {
+//             buf[sample * num_channels + ch] = channel_values[ch];
+//         }
+//     }
 
-    sr_analog_init(&analog, &encoding, &meaning, &spec, num_channels);
-    analog.meaning->channels = devc->enabled_analog_channels;
-    analog.meaning->mq = SR_MQ_VOLTAGE;
-    analog.meaning->unit = SR_UNIT_VOLT;
-    analog.meaning->mqflags = 0;
-    analog.num_samples = num_samples;  // samples per channel
-    analog.data = devc->analog_buffer;
+//     sr_analog_init(&analog, &encoding, &meaning, &spec, num_channels);
+//     analog.meaning->channels = devc->enabled_analog_channels;
+//     analog.meaning->mq = SR_MQ_VOLTAGE;
+//     analog.meaning->unit = SR_UNIT_VOLT;
+//     analog.meaning->mqflags = 0;
+//     analog.num_samples = num_samples;  // samples per channel
+//     analog.data = devc->analog_buffer;
 
-    const struct sr_datafeed_packet analog_packet = {
-        .type = SR_DF_ANALOG,
-        .payload = &analog
-    };
+//     const struct sr_datafeed_packet analog_packet = {
+//         .type = SR_DF_ANALOG,
+//         .payload = &analog
+//     };
 
-    sr_session_send(sdi, &analog_packet);
+//     sr_session_send(sdi, &analog_packet);
 
-    // Print debug
-    for (size_t i = 0; i < total_floats; i++) {
-        printf("[FINAL] Sample[%zu] = %.3f V\n", i, buf[i]);
-    }
-}
+//     // Print debug
+//     for (size_t i = 0; i < total_floats; i++) {
+//         printf("[FINAL] Sample[%zu] = %.3f V\n", i, buf[i]);
+//     }
+// }
 
 
 static void la_send_data_proc(struct sr_dev_inst *sdi,
